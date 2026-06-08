@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# ESMSeek artifacts
+.esmseek_cache/
+*.npy
+*.ids.txt
+hits.tsv
+
+# OS
+.DS_Store
