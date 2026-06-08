@@ -2,10 +2,14 @@
 
 **Structural homology search over raw DNA using protein language-model embeddings.**
 
-ESMSeek is a stand-alone CLI that takes raw DNA and a set of seed proteins and
-returns the proteins encoded in that DNA that look — *structurally/functionally*,
-in embedding space — most like the seeds. It is built to slot into an LSR
-(large serine recombinase) discovery pipeline: **FASTA in, TSV out**, no server.
+ESMSeek is a stand-alone CLI that takes a query FASTA — **raw DNA or amino-acid
+sequences** — plus a set of seed proteins, and returns the query proteins that
+look — *structurally/functionally*, in embedding space — most like the seeds. It
+is built to slot into an LSR (large serine recombinase) discovery pipeline:
+**FASTA in, TSV out**, no server.
+
+The query type is auto-detected per record: DNA records are translated into ORFs,
+amino-acid records are searched as-is, and a mixed FASTA is fine.
 
 The idea is embedding-based homology. Instead of scoring sequence identity
 (BLAST/DIAMOND), ESMSeek embeds each protein with [ESM-C](https://github.com/evolutionaryscale/esm),
@@ -14,9 +18,10 @@ the seeds via **FAISS k-NN**. This recovers remote homologs that share fold and
 function at sequence identities where alignment search goes quiet.
 
 ```
-raw DNA  ──▶  6-frame ORFs  ──▶  ESM-C embeddings ─┐
-                                                   ├─▶  cosine / FAISS k-NN  ──▶  ranked TSV
-seeds (AA or DNA) ───────────▶  ESM-C embeddings ──┘
+query DNA   ──▶  6-frame ORFs  ──┐
+query AA    ──▶  (used as-is)  ──┼▶  ESM-C embeddings ─┐
+                                                       ├─▶  cosine / FAISS k-NN  ──▶  ranked TSV
+seeds (AA or DNA) ──────────────────▶  ESM-C embeddings ┘
 ```
 
 ## Two tiers
@@ -49,18 +54,26 @@ download or a GPU.
 ## Quick start
 
 ```bash
+# DNA query (translated into ORFs):
 esmseek search \
-  --dna   examples/contigs.fna \
+  --query examples/contigs.fna \
   --seeds examples/seeds.faa \
   --out   hits.tsv \
   --backend esmc-local --model esmc_300m \
   --min-aa 100 --top-k 50 --min-score 0.5
+
+# Amino-acid query (each record searched as-is, no translation):
+esmseek search --query examples/proteins.faa --seeds examples/seeds.faa \
+  --backend esmc-local -o hits.tsv
 ```
+
+`-q` and `--in` are short forms of `--query`; `--dna` is kept as a backward-
+compatible alias. Force interpretation with `--seq-type {auto,dna,protein}`.
 
 Smoke-test with no model download (deterministic k-mer backend):
 
 ```bash
-esmseek search --dna examples/contigs.fna --seeds examples/seeds.faa \
+esmseek search --query examples/contigs.fna --seeds examples/seeds.faa \
   --backend hash --min-aa 60 -o hits.tsv
 ```
 
@@ -71,9 +84,12 @@ contig_metagenome_001|orf1|+1|4-390  LSR_seed_recombinase  0.87...  1          o
 
 ## Inputs
 
-* `--dna` — FASTA of raw DNA (or, with `--seq-type protein`, proteins). Each
-  record is auto-detected; DNA records are translated in all six frames and cut
-  into ORFs.
+* `--query` (aliases `-q`, `--in`, `--dna`) — FASTA of sequences to search.
+  Each record is auto-detected: **DNA** records are translated in all six frames
+  and cut into ORFs; **amino-acid** records are searched directly. A mixed FASTA
+  (some DNA, some protein) works. Override detection with `--seq-type dna` or
+  `--seq-type protein`. (File extension is irrelevant — detection is by content,
+  so a `.fna`/`.faa`/`.fasta` of either type is fine.)
 * `--seeds` — FASTA of one or more seed proteins. Seeds may be amino-acid **or**
   DNA (auto-detected; DNA seeds are translated to their longest ORF).
 

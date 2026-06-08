@@ -1,7 +1,8 @@
 """End-to-end Tier-1 search: FASTA in -> ranked hits.
 
-Stages: resolve seeds -> translate DNA into candidate ORFs -> embed both ->
-cosine k-NN (seeds query the candidate index) -> threshold/rank -> hits.
+Stages: resolve seeds -> collect candidate proteins from the query FASTA
+(translate DNA records into ORFs; use amino-acid records as-is) -> embed both
+-> cosine k-NN (seeds query the candidate index) -> threshold/rank -> hits.
 """
 
 from __future__ import annotations
@@ -63,9 +64,9 @@ def _resolve_seeds(seeds_path: str, seed_type: str) -> List[Tuple[str, str]]:
     return seeds
 
 
-def _collect_candidates(dna_path: str, cfg: SearchConfig) -> List[Candidate]:
+def _collect_candidates(query_path: str, cfg: SearchConfig) -> List[Candidate]:
     candidates: List[Candidate] = []
-    for rec in parse_fasta(dna_path):
+    for rec in parse_fasta(query_path):
         candidates.extend(
             candidates_from_record(
                 rec,
@@ -77,9 +78,10 @@ def _collect_candidates(dna_path: str, cfg: SearchConfig) -> List[Candidate]:
     return candidates
 
 
-def run_search(dna_path: str, seeds_path: str, cfg: SearchConfig) -> SearchResult:
+def run_search(query_path: str, seeds_path: str, cfg: SearchConfig) -> SearchResult:
+    """Search the records in ``query_path`` (DNA or amino acid) against seeds."""
     seeds = _resolve_seeds(seeds_path, cfg.seed_type)
-    candidates = _collect_candidates(dna_path, cfg)
+    candidates = _collect_candidates(query_path, cfg)
 
     meta = {
         "backend": cfg.backend,

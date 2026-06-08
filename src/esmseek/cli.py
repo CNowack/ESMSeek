@@ -1,6 +1,6 @@
 """Command-line interface for ESMSeek.
 
-    esmseek search --dna contigs.fasta --seeds seeds.fasta -o hits.tsv
+    esmseek search --query contigs.fasta --seeds seeds.fasta -o hits.tsv   # DNA or AA
     esmseek embed  --in proteins.fasta -o prefix          # utility: cache/export vectors
 """
 
@@ -59,9 +59,18 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ---- search ----------------------------------------------------------
-    s = sub.add_parser("search", help="Search DNA for proteins similar to seeds.")
-    s.add_argument("--dna", required=True,
-                   help="FASTA of raw DNA (or protein) sequences to search.")
+    s = sub.add_parser("search", help="Search DNA or protein records for hits to seeds.")
+    qin = s.add_mutually_exclusive_group(required=True)
+    qin.add_argument(
+        "--query", "-q", "--in", dest="query", metavar="FASTA",
+        help="FASTA of sequences to search — raw DNA *or* amino acids "
+             "(auto-detected per record; DNA is translated into ORFs, protein "
+             "records are searched as-is).",
+    )
+    qin.add_argument(
+        "--dna", dest="query", metavar="FASTA",
+        help="Alias for --query, kept for backward compatibility.",
+    )
     s.add_argument("--seeds", required=True,
                    help="FASTA of seed proteins (AA or DNA) to compare against.")
     s.add_argument("-o", "--out", default="-",
@@ -70,7 +79,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     g = s.add_argument_group("translation")
     g.add_argument("--seq-type", choices=["auto", "dna", "protein"], default="auto",
-                   help="How to interpret --dna records (default: auto-detect).")
+                   help="How to interpret --query records: auto-detect (default), "
+                        "force 'dna' (ORF finding) or force 'protein' (use as-is).")
     g.add_argument("--seed-type", choices=["auto", "dna", "protein"], default="auto",
                    help="How to interpret --seeds records (default: auto-detect).")
     g.add_argument("--min-aa", type=int, default=100,
@@ -135,7 +145,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
         calibrate_method=method,
         calibrate_n=n_per,
     )
-    result = run_search(args.dna, args.seeds, cfg)
+    result = run_search(args.query, args.seeds, cfg)
     write_tsv(
         result.hits,
         None if args.out == "-" else args.out,
