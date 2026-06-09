@@ -51,6 +51,31 @@ pip install -e ".[dev]" && pytest
 without them via the `hash` backend, so CI and plumbing never need a model
 download or a GPU.
 
+### macOS / Apple Silicon (M-series)
+
+Use a Python **3.11 or 3.12** virtualenv — 3.13/3.14 are ahead of some ML wheels
+(notably `faiss-cpu`) and lead to source builds or missing wheels.
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -U pip
+pip install -e ".[esmc]"     # torch + esm (CPU build runs fine on M-series)
+# FAISS is optional; if you want it on macOS, prefer conda-forge to avoid a
+# second OpenMP runtime (see below). Otherwise omit it — ESMSeek falls back to
+# an exact numpy search automatically.
+```
+
+**`OMP: Error #15 ... libomp.dylib already initialized` (abort/crash).** PyTorch's
+bundled OpenMP collides with another `libomp` in the process. ESMSeek's CLI
+**auto-applies the documented workaround on macOS** (`KMP_DUPLICATE_LIB_OK=TRUE`
++ `OMP_NUM_THREADS=1`, both `setdefault`, so your own settings win), so the
+`search`/`embed` commands should no longer crash. If you invoke Torch yourself,
+set those two variables before importing it. To fully remove the duplicate,
+install FAISS via conda-forge (single libomp) or skip FAISS entirely.
+
+The default device on a Mac is CPU; pass `--device mps` to try the Metal backend
+(faster, but some ops may fall back to CPU).
+
 ## Quick start
 
 ```bash

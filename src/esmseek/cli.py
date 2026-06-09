@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional, Tuple
 
@@ -29,7 +30,9 @@ def _add_embedder_args(p: argparse.ArgumentParser) -> None:
         help="Model name (default: esmc_300m for esmc-local, "
              "esmc-600m-2024-12 for esmc-forge).",
     )
-    g.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    g.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",
+                   help="Torch device (default: auto = cuda if present else cpu). "
+                        "On Apple Silicon, '--device mps' tries the Metal backend.")
     g.add_argument("--forge-token", default=None,
                    help="Forge API token (or set ESM_FORGE_TOKEN).")
     g.add_argument("--forge-url", default="https://forge.evolutionaryscale.ai")
@@ -192,7 +195,24 @@ def _cmd_embed(args: argparse.Namespace) -> int:
     return 0
 
 
+def _macos_openmp_guard() -> None:
+    """Avoid the duplicate-libomp abort that PyTorch hits on macOS.
+
+    On macOS, PyTorch's bundled ``libomp`` frequently collides with another
+    OpenMP runtime already loaded in the process (Homebrew's libomp, FAISS,
+    etc.), aborting with "OMP: Error #15 ... libomp.dylib already initialized".
+    We set the documented workaround *before* any Torch import, and pin a single
+    OpenMP thread so the workaround stays numerically safe. Both use
+    ``setdefault`` so an explicit user setting always wins. CLI-only: importing
+    esmseek as a library never mutates the environment.
+    """
+    if sys.platform == "darwin":
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _macos_openmp_guard()
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
