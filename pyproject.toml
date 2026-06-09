@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esmseek"
+version = "0.1.0"
+description = "Structural homology search over raw DNA using ESM-C protein embeddings (FASTA in, TSV out)."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Cam Nowack" }]
+requires-python = ">=3.9"
+keywords = ["bioinformatics", "protein", "embeddings", "esm", "esmc", "homology", "recombinase", "lsr"]
+
+# Core runtime deps are intentionally light so the pipeline (and CI) runs
+# anywhere with the deterministic `hash` backend. Heavy/optional backends and
+# the ANN index live in extras below.
+dependencies = [
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+# Approximate/large-scale nearest-neighbour search. Without it ESMSeek falls
+# back to an exact numpy brute-force search (identical results, slower at scale).
+faiss = ["faiss-cpu>=1.7"]
+# Local ESM-C inference (downloads open weights from HuggingFace on first use).
+esmc = ["torch>=2.0", "esm>=3.1"]
+# Everything needed to develop and run the test suite.
+dev = ["faiss-cpu>=1.7", "pytest>=7"]
+
+[project.scripts]
+esmseek = "esmseek.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/cnowack/esmseek"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
