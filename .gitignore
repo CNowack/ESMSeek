@@ -18,7 +18,8 @@ venv/
 hits.tsv
 
 # Local testing
-test/
+test1/
+test2/
 
 # OS
 .DS_Store
