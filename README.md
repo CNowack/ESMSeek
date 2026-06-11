@@ -184,6 +184,27 @@ seeds to build a null distribution, and annotates each hit with an empirical
 remaining Tier-2 work is empirical tuning of the decoy model and calibration set
 size, hence the experimental flag.
 
+## Per-residue aligner (experimental)
+
+Pooled cosine collapses each protein to one vector, so it can't reward a *local*
+stretch of structural similarity flanked by divergent regions. `esmseek.align`
+adds a pLM-BLAST-style alternative: it pulls the full per-residue ESM-C matrix
+(`Embedder.embed_residues` — same model pass as pooling, minus the mean), builds
+the residue-by-residue cosine grid, subtracts an anisotropy offset, and runs
+affine-gap **Smith–Waterman** for the best local score. The inner loop is
+numba-JIT'd when available, with a NumPy fallback.
+
+It is wired as a third engine for the discrimination test in
+`comparisons/run_aligner.py` (pooled cosine prefilter + numba keep it tractable
+over ~700 proteins). See `comparisons/results/v2/README.md` for the method and
+the reproduce commands.
+
+```bash
+python comparisons/run_aligner.py --seeds seeds.faa --pool candidates.faa \
+  --out esmc_aln.score.tsv --backend esmc-local --model esmc_300m \
+  --cache-dir .emb_cache --align-seeds 3 --estimate-anisotropy
+```
+
 ## Utility: `embed`
 
 Precompute/export embeddings (e.g. to build a reusable candidate index):
@@ -201,11 +222,13 @@ src/esmseek/
   pipeline.py      # orchestration + SearchConfig/SearchResult
   translate.py     # DNA detection, 6-frame translation, ORF finding
   search.py        # L2-normalise + FAISS/numpy cosine k-NN
+  align.py         # per-residue Smith–Waterman aligner (pLM-BLAST style)
   embedders/       # Embedder ABC, hashing, ESM-C (local/forge), disk cache
   calibrate.py     # Tier-2 decoy calibration + FDR
   seqio.py         # FASTA in, TSV out
 tests/             # pytest suite (runs on the `hash` backend, no model needed)
 examples/          # tiny demo contig + seed
+comparisons/       # discrimination test harness (pooled vs aligner vs Foldseek)
 ```
 
 ## License

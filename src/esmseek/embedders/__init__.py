@@ -48,9 +48,9 @@ class CachingEmbedder(Embedder):
     def dim(self) -> int:
         return self.inner.dim
 
-    def _key_path(self, seq: str) -> Path:
+    def _key_path(self, seq: str, suffix: str = "") -> Path:
         digest = hashlib.sha1(f"{self.inner.name}\x00{seq}".encode()).hexdigest()
-        return self.cache_dir / f"{digest}.npy"
+        return self.cache_dir / f"{digest}{suffix}.npy"
 
     def embed(self, sequences: Sequence[str]) -> np.ndarray:
         results: List[Optional[np.ndarray]] = [None] * len(sequences)
@@ -71,6 +71,28 @@ class CachingEmbedder(Embedder):
 
         dim = self.inner.dim if not missing_idx else int(results[missing_idx[0]].shape[0])
         return stack([r for r in results if r is not None], dim)
+
+    def embed_residues(self, sequences: Sequence[str]) -> List[np.ndarray]:
+        # Residue matrices are ragged (one (L_i, dim) per sequence), so they are
+        # cached one file per sequence under a ".res" suffix to keep them
+        # distinct from the pooled ".npy" vectors.
+        results: List[Optional[np.ndarray]] = [None] * len(sequences)
+        missing_idx: List[int] = []
+        for i, seq in enumerate(sequences):
+            path = self._key_path(seq, ".res")
+            if path.exists():
+                results[i] = np.load(path)
+            else:
+                missing_idx.append(i)
+
+        if missing_idx:
+            fresh = self.inner.embed_residues([sequences[i] for i in missing_idx])
+            for j, i in enumerate(missing_idx):
+                mat = np.ascontiguousarray(fresh[j], dtype=np.float32)
+                np.save(self._key_path(sequences[i], ".res"), mat)
+                results[i] = mat
+
+        return [r for r in results if r is not None]
 
 
 def get_embedder(
