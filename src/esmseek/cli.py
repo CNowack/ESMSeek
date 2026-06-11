@@ -1,12 +1,13 @@
 """Command-line interface for ESMSeek.
 
-    esmseek search --dna contigs.fasta --seeds seeds.fasta -o hits.tsv
+    esmseek search --query contigs.fasta --seeds seeds.fasta -o hits.tsv   # DNA or AA
     esmseek embed  --in proteins.fasta -o prefix          # utility: cache/export vectors
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional, Tuple
 
@@ -29,7 +30,9 @@ def _add_embedder_args(p: argparse.ArgumentParser) -> None:
         help="Model name (default: esmc_300m for esmc-local, "
              "esmc-600m-2024-12 for esmc-forge).",
     )
-    g.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    g.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",
+                   help="Torch device (default: auto = cuda if present else cpu). "
+                        "On Apple Silicon, '--device mps' tries the Metal backend.")
     g.add_argument("--forge-token", default=None,
                    help="Forge API token (or set ESM_FORGE_TOKEN).")
     g.add_argument("--forge-url", default="https://forge.evolutionaryscale.ai")
@@ -59,9 +62,18 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ---- search ----------------------------------------------------------
-    s = sub.add_parser("search", help="Search DNA for proteins similar to seeds.")
-    s.add_argument("--dna", required=True,
-                   help="FASTA of raw DNA (or protein) sequences to search.")
+    s = sub.add_parser("search", help="Search DNA or protein records for hits to seeds.")
+    qin = s.add_mutually_exclusive_group(required=True)
+    qin.add_argument(
+        "--query", "-q", "--in", dest="query", metavar="FASTA",
+        help="FASTA of sequences to search — raw DNA *or* amino acids "
+             "(auto-detected per record; DNA is translated into ORFs, protein "
+             "records are searched as-is).",
+    )
+    qin.add_argument(
+        "--dna", dest="query", metavar="FASTA",
+        help="Alias for --query, kept for backward compatibility.",
+    )
     s.add_argument("--seeds", required=True,
                    help="FASTA of seed proteins (AA or DNA) to compare against.")
     s.add_argument("-o", "--out", default="-",
@@ -70,7 +82,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     g = s.add_argument_group("translation")
     g.add_argument("--seq-type", choices=["auto", "dna", "protein"], default="auto",
-                   help="How to interpret --dna records (default: auto-detect).")
+                   help="How to interpret --query records: auto-detect (default), "
+                        "force 'dna' (ORF finding) or force 'protein' (use as-is).")
     g.add_argument("--seed-type", choices=["auto", "dna", "protein"], default="auto",
                    help="How to interpret --seeds records (default: auto-detect).")
     g.add_argument("--min-aa", type=int, default=100,
@@ -135,7 +148,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
         calibrate_method=method,
         calibrate_n=n_per,
     )
-    result = run_search(args.dna, args.seeds, cfg)
+    result = run_search(args.query, args.seeds, cfg)
     write_tsv(
         result.hits,
         None if args.out == "-" else args.out,
@@ -182,7 +195,24 @@ def _cmd_embed(args: argparse.Namespace) -> int:
     return 0
 
 
+def _macos_openmp_guard() -> None:
+    """Avoid the duplicate-libomp abort that PyTorch hits on macOS.
+
+    On macOS, PyTorch's bundled ``libomp`` frequently collides with another
+    OpenMP runtime already loaded in the process (Homebrew's libomp, FAISS,
+    etc.), aborting with "OMP: Error #15 ... libomp.dylib already initialized".
+    We set the documented workaround *before* any Torch import, and pin a single
+    OpenMP thread so the workaround stays numerically safe. Both use
+    ``setdefault`` so an explicit user setting always wins. CLI-only: importing
+    esmseek as a library never mutates the environment.
+    """
+    if sys.platform == "darwin":
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _macos_openmp_guard()
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
