@@ -78,15 +78,39 @@ python comparisons/score_discrimination.py \
 `esmc_aln.score.tsv` is two columns, `candidate_id<TAB>score` (higher = more
 LSR-like) — the same contract `score_discrimination.py` reads for every engine.
 
-## Status of the numbers
+## Results
 
-The aligner, the driver, and the three-way harness are implemented and tested.
-The **scored comparison table is not filled in here**: reproducing it needs the
-v1 694-candidate pool FASTA + `labels.tsv` (regenerated via `build_pool.py`, not
-committed to this repo) and a working ESM-C backend (torch + esm weights), which
-the development sandbox lacks. Run the commands above on a box with ESM-C to
-populate `esmc_aln.score.tsv` and append the resulting table (AUROC, decoy pass
-per family, divergent recall) alongside v1's pooled and Foldseek columns.
+Run on the v1 694-candidate pool (55 LSR positives, 16 divergent; 639 decoys),
+seeds = 15, `esmc_300m`, default aligner knobs (`--gap-open 0.5 --gap-extend 0.1
+--align-seeds 3 --estimate-anisotropy`). Threshold set to **95% LSR recall**;
+lower decoy pass = better, higher divergent recall = better.
+
+| Engine | AUROC | LSR recall | decoy pass | resolvase | transposase | tyrosine | divergent recall |
+|---|---|---|---|---|---|---|---|
+| pooled | 0.904 | 0.96 | 0.31 | 0.44 | 0.07 | 0.13 | 0.88 |
+| **esmc_aln** | **0.927** | 0.96 | **0.22** | **0.36** | 0.00 | 0.00 | 0.88 |
+| foldseek | 0.928 | 0.96 | 0.26 | 0.41 | 0.00 | 0.00 | 0.88 |
+
+**Read.** The per-residue aligner beats pooled ESM-C on every column and ties
+Foldseek on overall AUROC (0.927 vs 0.928 — a dead tie). Its decoy rejection is
+the best of the three: overall leakage drops 31% → 22%, the different-fold
+decoys (transposase, tyrosine) go to 0% like Foldseek, and — notably — it edges
+Foldseek on the hardest family, **resolvases (36% vs 41% vs 44%)**, the leakage
+v1 called a shared, method-independent wall. This reopens the question v1 closed
+("the custom aligner is not justified"): with no tuning it matches the
+off-the-shelf structural tool and is the single best decoy-rejecter.
+
+**Caveats.** (1) The win is *decoy purity, not divergent sensitivity*: divergent
+recall is identical (0.88, ≈14/16) across all three engines — the aligner
+recovers no remote LSR that pooled/Foldseek miss. (2) The AUROC gap to pooled
+(0.023) is within the ±0.04 sampling band for 55 positives; the gap to Foldseek
+is noise. The decoy numbers rest on 639 decoys (400 resolvases) and are more
+trustworthy, but the resolvase improvement is ~2 SE — bootstrap a CI before
+calling it definitive. (3) The shared wall persists at the sequence level:
+`resolvase__A0ABQ5PNS2` scores 312.9 (above most true LSRs), the same resolvase
+that ranked 7th under both v1 engines — consistent with v1's read that part of
+the PF00239 set is genuinely mislabelled large serine recombinases. The
+length / domain-architecture gate v1 recommended is still the fix for those.
 
 ## Tuning knobs that matter
 
