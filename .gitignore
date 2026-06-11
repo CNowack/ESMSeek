@@ -9,12 +9,16 @@ dist/
 .mypy_cache/
 .venv/
 venv/
+.venv312
 
 # ESMSeek artifacts
 .esmseek_cache/
 *.npy
 *.ids.txt
 hits.tsv
+
+# Local testing
+test/
 
 # OS
 .DS_Store
