@@ -84,16 +84,17 @@ def auroc(pos, neg):
     return U1 / (pos.size * neg.size)
 
 
-def evaluate(name, scores, labels, target_recall):
-    worst = min(scores.values()) - 1.0 if scores else 0.0
-    ids = list(labels.keys())
-    sc = np.array([scores.get(i, worst) for i in ids])
-    cls = np.array([labels[i][0] for i in ids])
-    is_lsr = cls == "lsr"
-    lsr_scores = sc[is_lsr]
-    dec_scores = sc[~is_lsr]
+def _metrics(sc, cls, is_lsr, divergent, target_recall):
+    """Compute the discrimination metrics for one engine on aligned arrays.
 
-    A = auroc(lsr_scores, dec_scores)
+    ``sc``/``cls``/``is_lsr``/``divergent`` are parallel arrays over the same set
+    of candidates (in the same order). Returns a dict of scalar metrics plus the
+    per-family pass-rate dict. Pulled out of :func:`evaluate` so the bootstrap can
+    call it on resampled index sets.
+    """
+    dec_mask = ~is_lsr
+    lsr_scores = sc[is_lsr]
+    A = auroc(lsr_scores, sc[dec_mask])
 
     # threshold that retains `target_recall` of LSRs:
     # keep score >= threshold; choose the (1-recall) lower quantile of LSR scores.
@@ -101,26 +102,104 @@ def evaluate(name, scores, labels, target_recall):
     realized_recall = float((lsr_scores >= thr).mean())
 
     passed = sc >= thr
-    overall_decoy_pass = float(passed[~is_lsr].mean()) if (~is_lsr).any() else float("nan")
+    overall_decoy_pass = float(passed[dec_mask].mean()) if dec_mask.any() else float("nan")
 
-    # per decoy family
     fam_pass = {}
-    for fam in sorted(set(cls[~is_lsr])):
+    for fam in sorted(set(cls[dec_mask])):
         m = cls == fam
         fam_pass[fam] = float(passed[m].mean())
 
-    # divergent-LSR recall at this threshold
-    divergent = np.array([labels[i][1].lower() == "true" for i in ids])
     div_mask = is_lsr & divergent
     div_recall = float(passed[div_mask].mean()) if div_mask.any() else float("nan")
-    n_div = int(div_mask.sum())
 
     return {
-        "name": name, "auroc": A, "thr": float(thr),
-        "lsr_recall": realized_recall, "decoy_pass": overall_decoy_pass,
-        "fam_pass": fam_pass, "div_recall": div_recall, "n_div": n_div,
-        "n_lsr": int(is_lsr.sum()), "n_decoy": int((~is_lsr).sum()),
+        "auroc": A, "thr": float(thr), "lsr_recall": realized_recall,
+        "decoy_pass": overall_decoy_pass, "fam_pass": fam_pass, "div_recall": div_recall,
     }
+
+
+def _engine_arrays(scores, labels):
+    """Build the per-candidate arrays for one engine, aligned to ``labels`` order.
+
+    Candidates missing from a score file get that engine's worst score (no hit).
+    """
+    worst = min(scores.values()) - 1.0 if scores else 0.0
+    ids = list(labels.keys())
+    sc = np.array([scores.get(i, worst) for i in ids], dtype=float)
+    cls = np.array([labels[i][0] for i in ids])
+    is_lsr = cls == "lsr"
+    divergent = np.array([labels[i][1].lower() == "true" for i in ids])
+    return sc, cls, is_lsr, divergent
+
+
+def evaluate(name, scores, labels, target_recall):
+    sc, cls, is_lsr, divergent = _engine_arrays(scores, labels)
+    m = _metrics(sc, cls, is_lsr, divergent, target_recall)
+    m.update({
+        "name": name,
+        "n_div": int((is_lsr & divergent).sum()),
+        "n_lsr": int(is_lsr.sum()), "n_decoy": int((~is_lsr).sum()),
+    })
+    return m
+
+
+def _stratified_resamples(cls, n_boot, rng):
+    """Yield ``n_boot`` index arrays, each resampling *within* every class with
+    replacement so the LSR / per-decoy-family counts are preserved (the test's
+    design is fixed; only sampling noise is bootstrapped)."""
+    groups = [np.where(cls == c)[0] for c in sorted(set(cls.tolist()))]
+    for _ in range(n_boot):
+        yield np.concatenate([rng.choice(g, size=len(g), replace=True) for g in groups])
+
+
+def _ci(values, lo=2.5, hi=97.5):
+    v = np.asarray(values, float)
+    v = v[~np.isnan(v)]
+    if v.size == 0:
+        return (float("nan"), float("nan"))
+    return float(np.percentile(v, lo)), float(np.percentile(v, hi))
+
+
+def bootstrap(engine_data, fams, target_recall, n_boot, seed):
+    """Shared-resample bootstrap across all engines.
+
+    The SAME stratified resample is applied to every engine each iteration, so
+    per-engine CIs and paired engine-vs-engine differences are both valid (the
+    pairing controls for which candidates happen to be drawn).
+
+    Returns ``(per_engine_ci, paired_ci)``:
+      * ``per_engine_ci[name][metric]   -> (lo, hi)``
+      * ``paired_ci[name][metric]       -> (delta, lo, hi)``  (name minus baseline)
+    """
+    names = [d["name"] for d in engine_data]
+    # any engine shares the same cls/is_lsr/divergent ordering
+    cls = engine_data[0]["cls"]
+    metric_keys = ["auroc", "decoy_pass", "div_recall"] + [f"{f}_pass" for f in fams]
+    dist = {name: {k: [] for k in metric_keys} for name in names}
+
+    rng = np.random.default_rng(seed)
+    for idx in _stratified_resamples(cls, n_boot, rng):
+        for d in engine_data:
+            m = _metrics(d["sc"][idx], cls[idx], d["is_lsr"][idx], d["divergent"][idx],
+                         target_recall)
+            dist[d["name"]]["auroc"].append(m["auroc"])
+            dist[d["name"]]["decoy_pass"].append(m["decoy_pass"])
+            dist[d["name"]]["div_recall"].append(m["div_recall"])
+            for f in fams:
+                dist[d["name"]][f"{f}_pass"].append(m["fam_pass"].get(f, float("nan")))
+
+    per_engine_ci = {name: {k: _ci(dist[name][k]) for k in metric_keys} for name in names}
+
+    baseline = names[0]
+    paired_ci = {}
+    for name in names[1:]:
+        paired_ci[name] = {}
+        for k in ["decoy_pass", "auroc"] + [f"{f}_pass" for f in fams]:
+            diff = np.asarray(dist[name][k], float) - np.asarray(dist[baseline][k], float)
+            diff = diff[~np.isnan(diff)]
+            lo, hi = _ci(diff)
+            paired_ci[name][k] = (float(np.mean(diff)) if diff.size else float("nan"), lo, hi)
+    return per_engine_ci, paired_ci
 
 
 def main():
@@ -129,15 +208,23 @@ def main():
     ap.add_argument("--scores", nargs="+", required=True,
                     help="NAME=FILE pairs, e.g. esmc=esmc.score.tsv foldseek=fold.score.tsv")
     ap.add_argument("--target-recall", type=float, default=0.95)
+    ap.add_argument("--bootstrap", type=int, default=0, metavar="N",
+                    help="Bootstrap resamples for 95%% CIs (e.g. 2000). 0 = off.")
+    ap.add_argument("--bootstrap-seed", type=int, default=0)
     args = ap.parse_args()
 
     labels = read_labels(args.labels)
     engines = []
+    engine_data = []  # raw arrays kept for the bootstrap
     for spec in args.scores:
         if "=" not in spec:
             sys.exit(f"--scores expects NAME=FILE, got {spec!r}")
         name, path = spec.split("=", 1)
-        engines.append(evaluate(name, read_scores(path), labels, args.target_recall))
+        scores = read_scores(path)
+        engines.append(evaluate(name, scores, labels, args.target_recall))
+        sc, cls, is_lsr, divergent = _engine_arrays(scores, labels)
+        engine_data.append({"name": name, "sc": sc, "cls": cls,
+                            "is_lsr": is_lsr, "divergent": divergent})
 
     n_lsr = engines[0]["n_lsr"]; n_dec = engines[0]["n_decoy"]
     print(f"\npool: {n_lsr} LSR positives ({engines[0]['n_div']} divergent), "
@@ -155,9 +242,41 @@ def main():
     print("\nread: higher AUROC is better; at matched LSR recall, LOWER decoy_pass "
           "is better (especially resolvase). Watch divergent_recall — an engine that\n"
           "drops the divergent LSRs is failing the case you built this for.")
-    if n_lsr < 30 or engines[0]["n_div"] < 10:
+
+    if args.bootstrap > 0:
+        per_engine_ci, paired_ci = bootstrap(
+            engine_data, fams, args.target_recall, args.bootstrap, args.bootstrap_seed)
+        ci_cols = ["AUROC", "decoy_pass"] + [f"{f}_pass" for f in fams] + ["divergent_recall"]
+        key_of = {"AUROC": "auroc", "decoy_pass": "decoy_pass",
+                  "divergent_recall": "div_recall",
+                  **{f"{f}_pass": f"{f}_pass" for f in fams}}
+        print(f"\n95% CI ({args.bootstrap} stratified resamples), shown as lo–hi:")
+        print("\t".join(["engine"] + ci_cols))
+        for e in engines:
+            row = [e["name"]]
+            for c in ci_cols:
+                lo, hi = per_engine_ci[e["name"]][key_of[c]]
+                row.append(f"{lo:.2f}–{hi:.2f}")
+            print("\t".join(row))
+
+        baseline = engines[0]["name"]
+        print(f"\npaired difference vs '{baseline}' (Δ = engine − {baseline}; "
+              f"95% CI; * = CI excludes 0):")
+        print("\t".join(["engine", "Δdecoy_pass"] + [f"Δ{f}_pass" for f in fams] + ["ΔAUROC"]))
+        for e in engines[1:]:
+            cells = [e["name"]]
+            for k in ["decoy_pass"] + [f"{f}_pass" for f in fams] + ["auroc"]:
+                delta, lo, hi = paired_ci[e["name"]][k]
+                star = "*" if (lo > 0 or hi < 0) else ""
+                cells.append(f"{delta:+.2f} [{lo:+.2f},{hi:+.2f}]{star}")
+            print("\t".join(cells))
+        print("\nread: for Δdecoy_pass / Δresolvase_pass, NEGATIVE means the engine "
+              "leaks fewer decoys than the baseline. A '*' (CI excludes 0) means the\n"
+              "difference is unlikely to be sampling noise. List the engine you want as "
+              "the baseline FIRST in --scores.")
+    elif n_lsr < 30 or engines[0]["n_div"] < 10:
         print(f"\n[warn] small sample (LSR={n_lsr}, divergent={engines[0]['n_div']}): "
-              "treat a small AUROC gap as a tie; bootstrap CIs before trusting a winner.")
+              "treat a small AUROC gap as a tie; add --bootstrap 2000 for CIs.")
 
 
 if __name__ == "__main__":
