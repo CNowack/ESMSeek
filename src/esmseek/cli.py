@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 
 from . import __version__
 from .embedders import BACKENDS, get_embedder
-from .pipeline import SearchConfig, run_search
+from .pipeline import ENGINES, SearchConfig, run_search
 from .seqio import parse_fasta, write_tsv
 from .translate import seed_to_protein
 
@@ -78,7 +78,35 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="FASTA of seed proteins (AA or DNA) to compare against.")
     s.add_argument("-o", "--out", default="-",
                    help="Output TSV path ('-' for stdout, the default).")
+    s.add_argument(
+        "--engine", choices=ENGINES, default="foldseek",
+        help="Scoring engine (default: foldseek). 'foldseek' = ProstT5 3Di + "
+             "Foldseek (least overhead, no torch/esm); 'esmc-align' = per-residue "
+             "Smith–Waterman over ESM-C; 'esmc-pooled' = mean-pooled ESM-C cosine.",
+    )
     _add_embedder_args(s)
+
+    g = s.add_argument_group("foldseek engine")
+    g.add_argument("--foldseek-bin", default="foldseek",
+                   help="Path to the foldseek executable (default: 'foldseek' on PATH).")
+    g.add_argument("--foldseek-prostt5", default=None,
+                   help="ProstT5 weights dir for sequence→3Di (or set "
+                        "FOLDSEEK_PROSTT5_MODEL). Get it via "
+                        "`foldseek databases ProstT5 <dir> tmp`.")
+    g.add_argument("--foldseek-sensitivity", type=float, default=9.5,
+                   help="Foldseek search sensitivity -s (default: 9.5).")
+    g.add_argument("--foldseek-evalue", type=float, default=1000.0,
+                   help="Foldseek search e-value -e (default: 1000).")
+
+    g = s.add_argument_group("esmc-align engine")
+    g.add_argument("--align-gap-open", type=float, default=0.5,
+                   help="Smith–Waterman gap-open penalty (default: 0.5).")
+    g.add_argument("--align-gap-extend", type=float, default=0.1,
+                   help="Smith–Waterman gap-extend penalty (default: 0.1).")
+    g.add_argument("--align-anisotropy", type=float, default=0.0,
+                   help="Constant cosine-baseline offset subtracted from the grid.")
+    g.add_argument("--estimate-anisotropy", action="store_true",
+                   help="Estimate the anisotropy offset from the data instead.")
 
     g = s.add_argument_group("translation")
     g.add_argument("--seq-type", choices=["auto", "dna", "protein"], default="auto",
@@ -95,8 +123,8 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--top-k", type=int, default=50,
                    help="Candidates reported per seed; <=0 for all (default: 50).")
     g.add_argument("--min-score", type=float, default=0.0,
-                   help="Minimum cosine similarity to report (default: 0.0). "
-                        "Meaningful cutoffs are model-dependent — see Tier 2.")
+                   help="Minimum engine score to report (default: 0.0). The score "
+                        "scale depends on --engine (cosine, SW score, or bits).")
     g.add_argument("--all-pairs", action="store_true",
                    help="Emit one row per (candidate, seed) instead of best-per-candidate.")
     g.add_argument("--no-seq", action="store_true",
@@ -129,6 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _cmd_search(args: argparse.Namespace) -> int:
     method, n_per = _parse_calibrate(args.calibrate)
     cfg = SearchConfig(
+        engine=args.engine,
         backend=args.backend,
         model=args.model,
         device=args.device,
@@ -145,6 +174,14 @@ def _cmd_search(args: argparse.Namespace) -> int:
         min_score=args.min_score,
         all_pairs=args.all_pairs,
         use_faiss=args.faiss,
+        align_gap_open=args.align_gap_open,
+        align_gap_extend=args.align_gap_extend,
+        align_anisotropy=args.align_anisotropy,
+        align_estimate_anisotropy=args.estimate_anisotropy,
+        foldseek_bin=args.foldseek_bin,
+        foldseek_prostt5=args.foldseek_prostt5,
+        foldseek_sensitivity=args.foldseek_sensitivity,
+        foldseek_evalue=args.foldseek_evalue,
         calibrate_method=method,
         calibrate_n=n_per,
     )
@@ -157,10 +194,15 @@ def _cmd_search(args: argparse.Namespace) -> int:
     )
     if not args.quiet:
         m = result.meta
+        extra = ""
+        if m.get("engine") == "foldseek":
+            extra = f"score={m.get('score_type')}"
+        else:
+            extra = (f"backend={m.get('backend')} embedder={m.get('embedder')} "
+                     f"score={m.get('score_type')}")
         print(
-            f"[esmseek] candidates={result.n_candidates} seeds={result.n_seeds} "
-            f"hits={len(result.hits)} backend={m.get('backend')} "
-            f"embedder={m.get('embedder')} search={m.get('search_backend')}",
+            f"[esmseek] engine={m.get('engine')} candidates={result.n_candidates} "
+            f"seeds={result.n_seeds} hits={len(result.hits)} {extra}".rstrip(),
             file=sys.stderr,
         )
     return 0
@@ -220,6 +262,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     except (ValueError, FileNotFoundError) as exc:
         print(f"esmseek: error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:  # engine failures (e.g. Foldseek) -> clean exit
+        from .foldseek import FoldseekError
+
+        if isinstance(exc, FoldseekError):
+            print(f"esmseek: error: {exc}", file=sys.stderr)
+            return 2
+        raise
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -194,7 +194,7 @@ def bootstrap(engine_data, fams, target_recall, n_boot, seed):
     paired_ci = {}
     for name in names[1:]:
         paired_ci[name] = {}
-        for k in ["decoy_pass", "auroc"] + [f"{f}_pass" for f in fams]:
+        for k in ["decoy_pass", "div_recall", "auroc"] + [f"{f}_pass" for f in fams]:
             diff = np.asarray(dist[name][k], float) - np.asarray(dist[baseline][k], float)
             diff = diff[~np.isnan(diff)]
             lo, hi = _ci(diff)
@@ -262,18 +262,19 @@ def main():
         baseline = engines[0]["name"]
         print(f"\npaired difference vs '{baseline}' (Δ = engine − {baseline}; "
               f"95% CI; * = CI excludes 0):")
-        print("\t".join(["engine", "Δdecoy_pass"] + [f"Δ{f}_pass" for f in fams] + ["ΔAUROC"]))
+        print("\t".join(["engine", "Δdecoy_pass"] + [f"Δ{f}_pass" for f in fams]
+                        + ["Δdivergent_recall", "ΔAUROC"]))
         for e in engines[1:]:
             cells = [e["name"]]
-            for k in ["decoy_pass"] + [f"{f}_pass" for f in fams] + ["auroc"]:
+            for k in ["decoy_pass"] + [f"{f}_pass" for f in fams] + ["div_recall", "auroc"]:
                 delta, lo, hi = paired_ci[e["name"]][k]
                 star = "*" if (lo > 0 or hi < 0) else ""
                 cells.append(f"{delta:+.2f} [{lo:+.2f},{hi:+.2f}]{star}")
             print("\t".join(cells))
         print("\nread: for Δdecoy_pass / Δresolvase_pass, NEGATIVE means the engine "
-              "leaks fewer decoys than the baseline. A '*' (CI excludes 0) means the\n"
-              "difference is unlikely to be sampling noise. List the engine you want as "
-              "the baseline FIRST in --scores.")
+              "leaks fewer decoys than the baseline; for Δdivergent_recall, POSITIVE means\n"
+              "it catches more of the divergent LSRs. A '*' (CI excludes 0) means the "
+              "difference is unlikely to be sampling noise. List the baseline engine FIRST.")
     elif n_lsr < 30 or engines[0]["n_div"] < 10:
         print(f"\n[warn] small sample (LSR={n_lsr}, divergent={engines[0]['n_div']}): "
               "treat a small AUROC gap as a tie; add --bootstrap 2000 for CIs.")

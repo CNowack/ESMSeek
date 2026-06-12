@@ -20,7 +20,7 @@ def _write_inputs(tmp_path, min_aa_protein=DEMO_PROTEIN):
 
 
 def _cfg(**kw):
-    base = dict(backend="hash", hash_dim=2048, min_aa=50, top_k=50)
+    base = dict(engine="esmc-pooled", backend="hash", hash_dim=2048, min_aa=50, top_k=50)
     base.update(kw)
     return SearchConfig(**base)
 

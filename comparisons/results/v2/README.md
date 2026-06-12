@@ -91,26 +91,64 @@ lower decoy pass = better, higher divergent recall = better.
 | **esmc_aln** | **0.927** | 0.96 | **0.22** | **0.36** | 0.00 | 0.00 | 0.88 |
 | foldseek | 0.928 | 0.96 | 0.26 | 0.41 | 0.00 | 0.00 | 0.88 |
 
-**Read.** The per-residue aligner beats pooled ESM-C on every column and ties
-Foldseek on overall AUROC (0.927 vs 0.928 — a dead tie). Its decoy rejection is
-the best of the three: overall leakage drops 31% → 22%, the different-fold
-decoys (transposase, tyrosine) go to 0% like Foldseek, and — notably — it edges
-Foldseek on the hardest family, **resolvases (36% vs 41% vs 44%)**, the leakage
-v1 called a shared, method-independent wall. This reopens the question v1 closed
-("the custom aligner is not justified"): with no tuning it matches the
-off-the-shelf structural tool and is the single best decoy-rejecter.
+**Point estimates flatter the aligner — the bootstrap says it's a tie.** A
+3000-resample stratified bootstrap (resampling within the LSR set and each decoy
+family; `score_discrimination.py --bootstrap 3000`) puts error bars on every
+number. None of the pairwise differences are significant — every paired CI
+crosses zero:
 
-**Caveats.** (1) The win is *decoy purity, not divergent sensitivity*: divergent
-recall is identical (0.88, ≈14/16) across all three engines — the aligner
-recovers no remote LSR that pooled/Foldseek miss. (2) The AUROC gap to pooled
-(0.023) is within the ±0.04 sampling band for 55 positives; the gap to Foldseek
-is noise. The decoy numbers rest on 639 decoys (400 resolvases) and are more
-trustworthy, but the resolvase improvement is ~2 SE — bootstrap a CI before
-calling it definitive. (3) The shared wall persists at the sequence level:
-`resolvase__A0ABQ5PNS2` scores 312.9 (above most true LSRs), the same resolvase
-that ranked 7th under both v1 engines — consistent with v1's read that part of
-the PF00239 set is genuinely mislabelled large serine recombinases. The
-length / domain-architecture gate v1 recommended is still the fix for those.
+| Δ vs esmc_aln | Δdecoy_pass | Δresolvase_pass | Δdivergent_recall | ΔAUROC |
+|---|---|---|---|---|
+| pooled   | +0.06 [−0.34, +0.17] | +0.05 [−0.35, +0.16] | +0.00 [−0.12, +0.12] | −0.02 [−0.05, 0.00] |
+| foldseek | +0.01 [−0.08, +0.06] | +0.03 [−0.09, +0.09] | −0.00 [−0.12, +0.12] | +0.00 [−0.01, +0.01] |
+
+So the v2 reading is: **the per-residue aligner is statistically
+indistinguishable from both pooled ESM-C and Foldseek on this 55-positive set.**
+The apparent "best decoy-rejecter" edge in the point table is within sampling
+noise. v1's "call it a tie and pick the simpler tool" conclusion holds.
+
+Two things the bootstrap makes clear:
+
+* **AUROC is the only stable metric here.** Its CIs are tight (aligner 0.89–0.96,
+  Foldseek 0.89–0.96) because it's a global rank statistic. `decoy_pass`-at-95%-
+  recall is wildly unstable (aligner CI 0.19–0.81) because the threshold is pinned
+  by ~3 LSRs; rank engines by AUROC, not by decoy pass at a fixed recall.
+* **One LSR, `Efs2`, drives the instability.** It is the lowest-scoring true LSR
+  for *every* engine (pooled 0.918 = its rank-55; Foldseek 98; aligner 14.9 vs its
+  other LSRs at 140–344). Sitting right at the 95%-recall threshold, it whips the
+  threshold around under resampling. Worth a look biologically — it may be the
+  most structurally divergent positive, or mis-annotated.
+
+### Knob sweep (aligner only)
+
+Re-running the aligner with one knob changed at a time (embeddings reused from
+`--cache-dir`, so only the alignment recomputes):
+
+| variant | AUROC | decoy_pass | resolvase | decoy_pass 95% CI |
+|---|---|---|---|---|
+| default (top-3 seeds, aniso on) | 0.927 | 0.22 | 0.36 | 0.19–0.81 |
+| `--align-seeds 15` (all seeds)  | 0.929 | 0.23 | 0.37 | 0.17–0.82 |
+| anisotropy **off**              | 0.933 | 0.24 | 0.38 | **0.16–0.51** |
+
+* **`--align-seeds 15` buys nothing** — every paired Δ ≈ 0.00 with tight CIs. The
+  top-3 pooled-cosine prefilter drops nothing that matters; keep `3` (faster).
+* **The anisotropy correction does not earn its place.** Turning it off gives
+  marginally higher AUROC and a far *more stable* decoy_pass CI — the offset is
+  what collapses `Efs2` to 14.9 and destabilises the threshold. The pLM-BLAST-style
+  background subtraction, expected to be the key knob, is at best neutral here.
+
+**Caveat that still holds:** the win that *would* matter — recovering divergent
+LSRs — doesn't happen. Divergent recall is 0.88 (≈14/16) for all three engines,
+CIs fully overlapping. And the shared resolvase wall persists:
+`resolvase__A0ABQ5PNS2` scores LSR-like under every engine (consistent with v1's
+read that part of PF00239 is mis-annotated large serine recombinases; the
+length / domain-architecture gate is still the fix).
+
+**Bottom line.** Pooled ESM-C, the per-residue aligner, and Foldseek are a
+three-way statistical tie on this benchmark. Foldseek wins on *cost* — one CPU
+binary, no torch/esm — so it is ESMSeek's default engine; the ESM-C engines stay
+selectable via `--engine` for when a larger positive set or further tuning can
+show a real difference.
 
 ## Tuning knobs that matter
 

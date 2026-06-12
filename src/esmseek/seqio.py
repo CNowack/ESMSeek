@@ -63,7 +63,7 @@ def parse_fasta(path: PathLike) -> List[SeqRecord]:
 HIT_COLUMNS: tuple[str, ...] = (
     "candidate_id",
     "seed_id",
-    "cosine",
+    "score",
     "seed_rank",
     "origin",
     "source_id",
@@ -83,7 +83,7 @@ def _hit_row(hit: Hit, include_seq: bool, include_calibration: bool) -> List[str
     row = {
         "candidate_id": c.id,
         "seed_id": hit.seed_id,
-        "cosine": f"{hit.score:.6f}",
+        "score": f"{hit.score:.6f}",
         "seed_rank": str(hit.seed_rank),
         "origin": c.origin,
         "source_id": c.source_id,
