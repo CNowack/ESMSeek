@@ -15,7 +15,7 @@ plumbing, and reproducible fixtures.
 from __future__ import annotations
 
 import hashlib
-from typing import Sequence
+from typing import List, Sequence
 
 import numpy as np
 
@@ -54,3 +54,28 @@ class HashingEmbedder(Embedder):
 
     def embed(self, sequences: Sequence[str]) -> np.ndarray:
         return stack([self._embed_one(s) for s in sequences], self._dim)
+
+    def _residue_kmer(self, seq: str, i: int) -> str:
+        """The k-mer window centred on residue ``i`` (clamped at the ends)."""
+        half = self.k // 2
+        start = max(0, min(i - half, len(seq) - self.k)) if len(seq) >= self.k else 0
+        return seq[start : start + self.k]
+
+    def _residues_one(self, seq: str) -> np.ndarray:
+        seq = seq.upper()
+        mat = np.zeros((len(seq), self._dim), dtype=np.float32)
+        for i in range(len(seq)):
+            kmer = self._residue_kmer(seq, i)
+            digest = hashlib.blake2b(kmer.encode(), digest_size=8).digest()
+            h = int.from_bytes(digest, "big")
+            sign = 1.0 if (h >> 63) & 1 else -1.0
+            mat[i, h % self._dim] = sign
+        return mat
+
+    def embed_residues(self, sequences: Sequence[str]) -> List[np.ndarray]:
+        """Per-residue features: each residue is the signed hash of its local
+        k-mer window. Not a structural signal — but identical local context maps
+        to identical residue vectors, so the per-residue aligner finds shared
+        substrings, which is enough to exercise it without an ESM-C download.
+        """
+        return [self._residues_one(s) for s in sequences]

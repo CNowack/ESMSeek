@@ -53,7 +53,7 @@ def test_write_tsv_header_and_row(tmp_path):
     fields = dict(zip(HIT_COLUMNS, lines[1].split("\t")))
     assert fields["candidate_id"] == "c1|orf1|+1|4-12"
     assert fields["seed_id"] == "seedA"
-    assert fields["cosine"] == "0.912300"
+    assert fields["score"] == "0.912300"
     assert fields["aa_seq"] == "MKV"
     assert fields["strand"] == "+"
 

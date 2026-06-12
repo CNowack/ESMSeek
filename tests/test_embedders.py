@@ -47,10 +47,38 @@ class _CountingEmbedder(HashingEmbedder):
     def __init__(self):
         super().__init__(dim=32, k=3)
         self.calls = []
+        self.res_calls = []
 
     def embed(self, sequences):
         self.calls.append(list(sequences))
         return super().embed(sequences)
+
+    def embed_residues(self, sequences):
+        self.res_calls.append(list(sequences))
+        return super().embed_residues(sequences)
+
+
+def test_hashing_residues_shape_and_determinism():
+    emb = HashingEmbedder(dim=64, k=3)
+    seq = "MSKVLTAQEII"
+    mats = emb.embed_residues([seq, seq])
+    assert mats[0].shape == (len(seq), 64)
+    assert mats[0].dtype == np.float32
+    assert np.array_equal(mats[0], mats[1])  # deterministic
+
+
+def test_caching_embedder_reuses_residues_on_disk(tmp_path):
+    inner = _CountingEmbedder()
+    cached = CachingEmbedder(inner, tmp_path)
+
+    first = cached.embed_residues(["AAAA", "MKVL"])
+    assert inner.res_calls == [["AAAA", "MKVL"]]  # both computed
+
+    second = cached.embed_residues(["AAAA", "PQRS"])
+    assert inner.res_calls[-1] == ["PQRS"]          # only the miss recomputed
+    assert np.array_equal(first[0], second[0])      # cached matrix identical
+    # Residue files are kept distinct from pooled vectors via the ".res" suffix.
+    assert any(p.name.endswith(".res.npy") for p in tmp_path.rglob("*.npy"))
 
 
 def test_caching_embedder_reuses_disk(tmp_path):

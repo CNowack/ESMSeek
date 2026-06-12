@@ -45,7 +45,7 @@ class Hit:
 
     candidate: Candidate
     seed_id: str
-    score: float                   # cosine similarity in [-1, 1]
+    score: float                   # engine score, higher = better (scale depends on engine)
     seed_rank: int = 0             # rank of this candidate within the seed's hit list (1 = best)
     # Tier-2 calibration fields (populated only when calibration is enabled).
     pvalue: Optional[float] = None

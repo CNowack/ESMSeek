@@ -11,25 +11,39 @@ is built to slot into an LSR (large serine recombinase) discovery pipeline:
 The query type is auto-detected per record: DNA records are translated into ORFs,
 amino-acid records are searched as-is, and a mixed FASTA is fine.
 
-The idea is embedding-based homology. Instead of scoring sequence identity
-(BLAST/DIAMOND), ESMSeek embeds each protein with [ESM-C](https://github.com/evolutionaryscale/esm),
-mean-pools to a single vector, and ranks candidates by **cosine similarity** to
-the seeds via **FAISS k-NN**. This recovers remote homologs that share fold and
-function at sequence identities where alignment search goes quiet.
+The idea is structural homology beyond sequence identity. Instead of scoring
+sequence identity (BLAST/DIAMOND), ESMSeek compares candidates to seeds by
+structure/embedding similarity, recovering remote homologs that share fold and
+function where alignment search goes quiet. ESMSeek collects the candidate
+proteins once and then scores them with a selectable **`--engine`**:
 
 ```
-query DNA   ──▶  6-frame ORFs  ──┐
-query AA    ──▶  (used as-is)  ──┼▶  ESM-C embeddings ─┐
-                                                       ├─▶  cosine / FAISS k-NN  ──▶  ranked TSV
-seeds (AA or DNA) ──────────────────▶  ESM-C embeddings ┘
+query DNA  ──▶ 6-frame ORFs ──┐                       ┌─ foldseek    : ProstT5 3Di + Foldseek search  ─┐
+query AA   ──▶ (used as-is)  ─┼▶ candidate proteins ──┼─ esmc-align  : per-residue Smith–Waterman      ┼─▶ ranked TSV
+seeds (AA or DNA) ────────────┘                       └─ esmc-pooled : mean-pooled ESM-C cosine / k-NN ─┘
 ```
+
+**Engines produce similar discrimination; they differ in overhead.** On the
+in-repo LSR benchmark the three are a statistical tie (see
+`comparisons/results/v2/`), so the choice is operational, not accuracy:
+
+| `--engine` | How it scores | Needs | Use it when |
+|---|---|---|---|
+| **`foldseek`** *(default)* | ProstT5 predicts a 3Di structure string; Foldseek searches it | the `foldseek` binary + ProstT5 weights (one CPU tool, no torch/esm) | **the default** — least overhead |
+| `esmc-align` | per-residue ESM-C embeddings aligned with Smith–Waterman (`esmseek.align`) | torch + esm (GPU recommended) | exploring whether ESM-C can beat Foldseek with tuning |
+| `esmc-pooled` | mean-pooled ESM-C vector, cosine via FAISS/numpy k-NN (the original Tier-1 path) | torch + esm | a fast single-vector ESM-C baseline |
+
+Foldseek is the default because it equals the ESM-C engines on this benchmark
+with the least setup. **To switch, change one argument** —
+`--engine esmc-align` — and nothing else in the command or the output format
+changes.
 
 ## Two tiers
 
 | Tier | Status | What it adds |
 |------|--------|--------------|
-| **Tier 1** | ✅ implemented | Pooled ESM-C embeddings + cosine/FAISS k-NN. FASTA in, TSV out. Raw cosine scores rank the hits. |
-| **Tier 2** | 🧪 scaffolded | Decoy calibration + FDR. Turns raw cosine into empirical p-/q-values so cutoffs are principled rather than eyeballed. Building blocks (`esmseek.calibrate`) are implemented and tested; the orchestrator is wired behind `--calibrate` and marked experimental pending empirical tuning. |
+| **Tier 1** | ✅ implemented | FASTA in, TSV out, three selectable `--engine`s (foldseek / esmc-align / esmc-pooled). Scores rank the hits. |
+| **Tier 2** | 🧪 scaffolded | Decoy calibration + FDR for the `esmc-pooled` engine. Turns raw cosine into empirical p-/q-values so cutoffs are principled rather than eyeballed. Building blocks (`esmseek.calibrate`) are implemented and tested; the orchestrator is wired behind `--calibrate` and marked experimental pending empirical tuning. |
 
 ## Install
 
@@ -79,33 +93,44 @@ The default device on a Mac is CPU; pass `--device mps` to try the Metal backend
 ## Quick start
 
 ```bash
-# DNA query (translated into ORFs):
+# Default engine (foldseek): needs the foldseek binary + a ProstT5 weights dir.
 esmseek search \
   --query examples/contigs.fna \
   --seeds examples/seeds.faa \
   --out   hits.tsv \
-  --backend esmc-local --model esmc_300m \
-  --min-aa 100 --top-k 50 --min-score 0.5
+  --foldseek-prostt5 /path/to/prostt5 \
+  --min-aa 100 --top-k 50
 
-# Amino-acid query (each record searched as-is, no translation):
+# Switch to the ESM-C aligner by changing ONE argument (same output format):
+esmseek search --query examples/contigs.fna --seeds examples/seeds.faa \
+  --engine esmc-align --backend esmc-local --model esmc_300m -o hits.tsv
+
+# Original pooled ESM-C cosine path:
 esmseek search --query examples/proteins.faa --seeds examples/seeds.faa \
-  --backend esmc-local -o hits.tsv
+  --engine esmc-pooled --backend esmc-local -o hits.tsv
 ```
 
 `-q` and `--in` are short forms of `--query`; `--dna` is kept as a backward-
 compatible alias. Force interpretation with `--seq-type {auto,dna,protein}`.
 
-Smoke-test with no model download (deterministic k-mer backend):
+Smoke-test the ESM-C plumbing with no model download (deterministic k-mer
+backend stands in for ESM-C):
 
 ```bash
 esmseek search --query examples/contigs.fna --seeds examples/seeds.faa \
-  --backend hash --min-aa 60 -o hits.tsv
+  --engine esmc-pooled --backend hash --min-aa 60 -o hits.tsv
 ```
 
 ```
-candidate_id                         seed_id               cosine   seed_rank  origin  ...  aa_len  aa_seq
+candidate_id                         seed_id               score    seed_rank  origin  ...  aa_len  aa_seq
 contig_metagenome_001|orf1|+1|4-390  LSR_seed_recombinase  0.87...  1          orf     ...  129     MSKV...
 ```
+
+The `score` column holds whatever the chosen engine produces — a cosine
+(`esmc-pooled`), a Smith–Waterman score (`esmc-align`), or a Foldseek bitscore
+(`foldseek`). The column name is stable so downstream parsing doesn't change when
+you switch engines; only the scale does (rank within an engine, don't compare
+scores across engines).
 
 ## Inputs
 
@@ -128,15 +153,15 @@ want ~300+).
 
 ## Output (TSV)
 
-One row per hit, sorted by descending cosine (deterministic tie-break on IDs).
+One row per hit, sorted by descending score (deterministic tie-break on IDs).
 By default the **best seed per candidate** is reported; `--all-pairs` emits one
-row per (candidate, seed).
+row per (candidate, seed). The columns are identical across engines.
 
 | column | meaning |
 |--------|---------|
 | `candidate_id` | `\|`-delimited: `source\|orfN\|<strand><frame>\|start-end` (or the protein ID) |
 | `seed_id` | seed this candidate best matched |
-| `cosine` | cosine similarity in [-1, 1] (the rank score) |
+| `score` | engine score (higher = better): cosine (`esmc-pooled`), Smith–Waterman (`esmc-align`), or Foldseek bits (`foldseek`). Rank within an engine; don't compare across engines. |
 | `seed_rank` | rank of this candidate within that seed's hit list |
 | `origin` | `orf` (translated from DNA) or `protein` |
 | `source_id` | source contig / record |
@@ -146,7 +171,11 @@ row per (candidate, seed).
 | `aa_seq` | candidate amino-acid sequence (omit with `--no-seq`) |
 | `pvalue`, `qvalue` | *only with `--calibrate`* — empirical significance + BH-FDR |
 
-## Backends
+## Backends (ESM-C engines only)
+
+`--engine` picks *how* candidates are scored; `--backend` picks *which ESM-C
+implementation* supplies the embeddings for the two `esmc-*` engines. It has no
+effect on `--engine foldseek` (which uses the foldseek binary, not ESM-C).
 
 | `--backend` | description |
 |-------------|-------------|
@@ -157,6 +186,20 @@ row per (candidate, seed).
 `--cache-dir DIR` caches embeddings per sequence (keyed by model + sequence
 hash) so re-runs over overlapping data are cheap — useful in an iterative
 discovery pipeline.
+
+### Foldseek engine setup
+
+`--engine foldseek` (the default) shells out to the `foldseek` binary, which
+predicts a 3Di structure string from sequence with ProstT5 and searches it:
+
+```bash
+conda install -c bioconda foldseek            # the binary
+foldseek databases ProstT5 prostt5_weights tmp # one-time ProstT5 download
+esmseek search ... --foldseek-prostt5 prostt5_weights   # or set FOLDSEEK_PROSTT5_MODEL
+```
+
+Tune with `--foldseek-sensitivity` (`-s`, default 9.5) and `--foldseek-evalue`
+(`-e`, default 1000); point at a non-PATH binary with `--foldseek-bin`.
 
 ## Search
 
@@ -184,6 +227,29 @@ seeds to build a null distribution, and annotates each hit with an empirical
 remaining Tier-2 work is empirical tuning of the decoy model and calibration set
 size, hence the experimental flag.
 
+## Per-residue aligner (`--engine esmc-align`)
+
+Pooled cosine collapses each protein to one vector, so it can't reward a *local*
+stretch of structural similarity flanked by divergent regions. The `esmc-align`
+engine (`esmseek.align`) is a pLM-BLAST-style alternative: it pulls the full
+per-residue ESM-C matrix (`Embedder.embed_residues` — same model pass as pooling,
+minus the mean), builds the residue-by-residue cosine grid, subtracts an
+anisotropy offset, and runs affine-gap **Smith–Waterman** for the best local
+score. The inner loop is numba-JIT'd when available, with a NumPy fallback.
+
+```bash
+esmseek search --query candidates.faa --seeds seeds.faa --engine esmc-align \
+  --backend esmc-local --model esmc_300m \
+  --align-gap-open 0.5 --align-gap-extend 0.1 --estimate-anisotropy -o hits.tsv
+```
+
+On the in-repo LSR benchmark this is a statistical tie with both `esmc-pooled`
+and `foldseek` (see `comparisons/results/v2/`), which is why Foldseek — the
+lighter tool — is the default. The aligner is kept selectable for when a larger
+positive set or further tuning might show a real ESM-C advantage. The comparison
+harness that produced those numbers lives in `comparisons/run_aligner.py`
+(adds a pooled-cosine prefilter + numba to stay tractable over ~700 proteins).
+
 ## Utility: `embed`
 
 Precompute/export embeddings (e.g. to build a reusable candidate index):
@@ -198,14 +264,17 @@ esmseek embed --in proteins.faa -o vectors --backend esmc-local
 ```
 src/esmseek/
   cli.py           # argparse CLI: `search`, `embed`
-  pipeline.py      # orchestration + SearchConfig/SearchResult
+  pipeline.py      # orchestration + SearchConfig/SearchResult + engine dispatch
   translate.py     # DNA detection, 6-frame translation, ORF finding
-  search.py        # L2-normalise + FAISS/numpy cosine k-NN
+  search.py        # L2-normalise + FAISS/numpy cosine k-NN (esmc-pooled engine)
+  align.py         # per-residue Smith–Waterman aligner (esmc-align engine)
+  foldseek.py      # ProstT5 + Foldseek subprocess engine (default)
   embedders/       # Embedder ABC, hashing, ESM-C (local/forge), disk cache
   calibrate.py     # Tier-2 decoy calibration + FDR
   seqio.py         # FASTA in, TSV out
 tests/             # pytest suite (runs on the `hash` backend, no model needed)
 examples/          # tiny demo contig + seed
+comparisons/       # discrimination test harness (pooled vs aligner vs Foldseek)
 ```
 
 ## License

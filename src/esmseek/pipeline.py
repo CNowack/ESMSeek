@@ -19,9 +19,18 @@ from .seqio import parse_fasta
 from .translate import candidates_from_record, seed_to_protein
 
 
+#: Scoring engines selectable via ``SearchConfig.engine`` / ``--engine``.
+ENGINES = ("foldseek", "esmc-align", "esmc-pooled")
+
+
 @dataclass
 class SearchConfig:
-    # Embedder
+    # Engine — how candidates are scored against seeds (see ENGINES).
+    # foldseek    : ProstT5 3Di + Foldseek (default; least overhead, no torch/esm)
+    # esmc-align  : per-residue Smith–Waterman over ESM-C embeddings
+    # esmc-pooled : mean-pooled ESM-C cosine k-NN (the original Tier-1 path)
+    engine: str = "foldseek"
+    # Embedder (used only by the esmc-* engines)
     backend: str = "esmc-local"
     model: Optional[str] = None
     device: str = "auto"
@@ -37,10 +46,20 @@ class SearchConfig:
     require_start: bool = False
     # Search / ranking
     top_k: int = 50              # candidates reported per seed (<=0 => all)
-    min_score: float = 0.0       # cosine cutoff (model-dependent; see Tier 2)
+    min_score: float = 0.0       # engine-score cutoff (scale depends on engine)
     all_pairs: bool = False      # one row per (candidate, seed) vs best-per-candidate
-    use_faiss: str = "auto"      # auto|always|never
-    # Tier 2 (experimental, off by default)
+    use_faiss: str = "auto"      # auto|always|never (esmc-pooled only)
+    # esmc-align knobs (see esmseek.align)
+    align_gap_open: float = 0.5
+    align_gap_extend: float = 0.1
+    align_anisotropy: float = 0.0
+    align_estimate_anisotropy: bool = False
+    # foldseek knobs (see esmseek.foldseek)
+    foldseek_bin: str = "foldseek"
+    foldseek_prostt5: Optional[str] = None
+    foldseek_sensitivity: float = 9.5
+    foldseek_evalue: float = 1000.0
+    # Tier 2 (experimental, off by default; esmc-pooled only)
     calibrate_method: Optional[str] = None  # "shuffle" | "reverse"
     calibrate_n: int = 1                     # decoys generated per candidate
 
@@ -78,44 +97,101 @@ def _collect_candidates(query_path: str, cfg: SearchConfig) -> List[Candidate]:
     return candidates
 
 
+def _dense_topk(sims: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Top-``k`` per row of a dense ``(n_seeds, n_cand)`` score matrix.
+
+    Returns ``(scores, idx)`` matching :meth:`KnnIndex.search`'s contract so the
+    engines that produce a full matrix can reuse :func:`_build_hits`.
+    """
+    n_seeds, n_cand = sims.shape
+    k_eff = min(k, n_cand) if k and k > 0 else n_cand
+    idx = np.argsort(-sims, axis=1)[:, :k_eff]
+    scores = np.take_along_axis(sims, idx, axis=1)
+    return scores.astype(np.float32), idx.astype(np.int64)
+
+
+def _align_score_matrix(seeds, candidates, cfg: SearchConfig, embedder) -> np.ndarray:
+    """Per-residue Smith–Waterman score of every candidate against every seed."""
+    from . import align
+
+    seed_res = [align.unit_normalize(m) for m in embedder.embed_residues([s for _, s in seeds])]
+    cand_res = [align.unit_normalize(m) for m in embedder.embed_residues([c.aa_seq for c in candidates])]
+
+    anisotropy = cfg.align_anisotropy
+    if cfg.align_estimate_anisotropy:
+        anisotropy = align.estimate_anisotropy(seed_res + cand_res)
+
+    S = np.zeros((len(seeds), len(candidates)), dtype=np.float32)
+    for si, smat in enumerate(seed_res):
+        for ci, cmat in enumerate(cand_res):
+            grid = align.similarity_grid(smat, cmat, anisotropy=anisotropy, normalized=True)
+            S[si, ci] = align.smith_waterman(grid, cfg.align_gap_open, cfg.align_gap_extend)
+    return S
+
+
 def run_search(query_path: str, seeds_path: str, cfg: SearchConfig) -> SearchResult:
     """Search the records in ``query_path`` (DNA or amino acid) against seeds."""
+    if cfg.engine not in ENGINES:
+        raise ValueError(f"Unknown engine {cfg.engine!r}; choose from {ENGINES}")
     seeds = _resolve_seeds(seeds_path, cfg.seed_type)
     candidates = _collect_candidates(query_path, cfg)
 
     meta = {
-        "backend": cfg.backend,
-        "model": cfg.model,
+        "engine": cfg.engine,
         "min_aa": cfg.min_aa,
         "require_start": cfg.require_start,
     }
     if not candidates:
         return SearchResult(hits=[], n_candidates=0, n_seeds=len(seeds), meta=meta)
 
-    embedder = get_embedder(
-        backend=cfg.backend,
-        model=cfg.model,
-        device=cfg.device,
-        forge_token=cfg.forge_token,
-        forge_url=cfg.forge_url,
-        hash_dim=cfg.hash_dim,
-        hash_k=cfg.hash_k,
-        cache_dir=cfg.cache_dir,
-    )
-    meta["embedder"] = embedder.name
-
-    seed_vecs = embedder.embed([s for _, s in seeds])
-    cand_vecs = embedder.embed([c.aa_seq for c in candidates])
-
-    index = KnnIndex(cand_vecs, use_faiss=cfg.use_faiss)
-    meta["search_backend"] = index.backend
-
     k = cfg.top_k if cfg.top_k and cfg.top_k > 0 else len(candidates)
-    scores, idx = index.search(seed_vecs, k=k)
+    embedder = None
+
+    if cfg.engine == "foldseek":
+        from . import foldseek
+
+        meta["score_type"] = "foldseek_bits"
+        sims = foldseek.score_matrix(
+            seeds,
+            [(c.id, c.aa_seq) for c in candidates],
+            foldseek_bin=cfg.foldseek_bin,
+            prostt5_model=cfg.foldseek_prostt5,
+            sensitivity=cfg.foldseek_sensitivity,
+            evalue=cfg.foldseek_evalue,
+        )
+        scores, idx = _dense_topk(sims, k)
+    else:
+        meta["backend"] = cfg.backend
+        meta["model"] = cfg.model
+        embedder = get_embedder(
+            backend=cfg.backend,
+            model=cfg.model,
+            device=cfg.device,
+            forge_token=cfg.forge_token,
+            forge_url=cfg.forge_url,
+            hash_dim=cfg.hash_dim,
+            hash_k=cfg.hash_k,
+            cache_dir=cfg.cache_dir,
+        )
+        meta["embedder"] = embedder.name
+
+        if cfg.engine == "esmc-align":
+            meta["score_type"] = "smith_waterman"
+            sims = _align_score_matrix(seeds, candidates, cfg, embedder)
+            scores, idx = _dense_topk(sims, k)
+        else:  # esmc-pooled
+            meta["score_type"] = "cosine"
+            seed_vecs = embedder.embed([s for _, s in seeds])
+            cand_vecs = embedder.embed([c.aa_seq for c in candidates])
+            index = KnnIndex(cand_vecs, use_faiss=cfg.use_faiss)
+            meta["search_backend"] = index.backend
+            scores, idx = index.search(seed_vecs, k=k)
 
     hits = _build_hits(seeds, candidates, scores, idx, cfg)
 
     if cfg.calibrate_method:
+        if cfg.engine != "esmc-pooled":
+            raise ValueError("--calibrate is only supported with --engine esmc-pooled")
         from .calibrate import calibrate_result
 
         hits = calibrate_result(

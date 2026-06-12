@@ -3,7 +3,9 @@
 Both paths use the ``esm`` SDK and the same call sequence — ``encode`` a
 sequence, then request embeddings via ``logits(..., LogitsConfig(
 return_embeddings=True))`` — and mean-pool the per-residue embeddings,
-excluding the leading BOS and trailing EOS tokens.
+excluding the leading BOS and trailing EOS tokens. ``embed_residues`` shares the
+same model pass but skips the pool, returning the full ``(L, dim)`` residue
+matrix for the per-residue aligner (:mod:`esmseek.align`).
 
 Heavy dependencies (``torch``, ``esm``) are imported lazily so the rest of the
 package imports cleanly without them installed.
@@ -38,29 +40,36 @@ class _ESMCBase(Embedder):
         assert self._dim is not None
         return self._dim
 
-    def _pool(self, embeddings) -> np.ndarray:  # pragma: no cover - needs torch
-        # embeddings: torch.Tensor of shape [1, L+2, dim]; drop BOS/EOS, mean-pool.
+    def _residues(self, embeddings) -> np.ndarray:  # pragma: no cover - needs torch
+        # embeddings: torch.Tensor of shape [1, L+2, dim]; drop the leading BOS
+        # and trailing EOS, returning the full (L, dim) residue matrix.
         import torch
 
         with torch.no_grad():
-            pooled = embeddings[0, 1:-1, :].mean(dim=0)
-        vec = pooled.to(torch.float32).cpu().numpy()
+            residues = embeddings[0, 1:-1, :]
+        mat = residues.to(torch.float32).cpu().numpy()
         if self._dim is None:
-            self._dim = int(vec.shape[0])
-        return vec
+            self._dim = int(mat.shape[1])
+        return mat
 
-    def embed(self, sequences: Sequence[str]) -> np.ndarray:  # pragma: no cover - needs weights
+    def _pool(self, embeddings) -> np.ndarray:  # pragma: no cover - needs torch
+        # Mean-pool the per-residue matrix (BOS/EOS already excluded).
+        return self._residues(embeddings).mean(axis=0)
+
+    def _forward(self, sequence: str):  # pragma: no cover - needs weights
         from esm.sdk.api import ESMProtein, LogitsConfig
 
         client = self._ensure_client()
         cfg = LogitsConfig(sequence=True, return_embeddings=True)
-        vecs: List[np.ndarray] = []
-        for seq in sequences:
-            protein = ESMProtein(sequence=seq)
-            tensor = client.encode(protein)
-            out = client.logits(tensor, cfg)
-            vecs.append(self._pool(out.embeddings))
+        tensor = client.encode(ESMProtein(sequence=sequence))
+        return client.logits(tensor, cfg).embeddings
+
+    def embed(self, sequences: Sequence[str]) -> np.ndarray:  # pragma: no cover - needs weights
+        vecs: List[np.ndarray] = [self._pool(self._forward(seq)) for seq in sequences]
         return stack(vecs, self._dim or (vecs[0].shape[0] if vecs else 0))
+
+    def embed_residues(self, sequences: Sequence[str]) -> List[np.ndarray]:  # pragma: no cover - needs weights
+        return [self._residues(self._forward(seq)) for seq in sequences]
 
 
 class ESMCLocalEmbedder(_ESMCBase):
